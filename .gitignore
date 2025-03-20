@@ -1,0 +1,37 @@
+# wandb相关文件
+wandb/
+*.wandb
+
+# 模型权重和检查点
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+test_*/
+
+# output文件夹
+output/
+
+# 数据集文件
+data/*.json
+data/ShareGPT_Vicuna_unfiltered/
+
+# Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+venv/
+ENV/
+
+# 系统文件
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 保留data文件夹下的Python文件
+!data/*.py
