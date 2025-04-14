@@ -1,8 +1,6 @@
 import torch
 import torch.nn.functional as F
 
-TOPK=10 # topk for sparse tree (10 is a placeholder and it is sufficient)
-
 def pad_path(path, length, pad_value=-2):
     """
     Pad the given path list with a specific value up to a specified length.
@@ -29,103 +27,96 @@ def pad_path(path, length, pad_value=-2):
     # Append the padding values to the original path and return the new list.
     return path + [pad_value] * (length - len(path))
 
-def generate_medusa_buffers(medusa_choices, device="cuda"):
+def generate_mhc_buffers(node_paths, device="cuda"):
     """
-    Generate buffers for the Medusa structure based on the provided choices.
+    根据node_paths生成MHC所需的缓冲区
     
     Parameters:
-    - medusa_choices (list): A nested list representing tree in the Medusa structure.
-    - device (str): Device to which the tensors should be moved. Default is "cuda".
+    - node_paths (list): 排序后的路径参数，每个路径是一个整数列表
+    - device (str): 设备名称，默认为"cuda"
     
     Returns:
-    - dict: A dictionary containing buffers related to the Medusa structure.
+    - dict: 包含MHC相关缓冲区的字典
     """
 
-    # Sort the medusa_choices based on their lengths and then their values
-    sorted_medusa_choices = sorted(medusa_choices, key=lambda x: (len(x), x))
-    medusa_len = len(sorted_medusa_choices) + 1
-
-    # Initialize depth_counts to keep track of how many choices have a particular depth
-    depth_counts = []
-    prev_depth = 0
-    for path in sorted_medusa_choices:
-        depth = len(path)
-        if depth != prev_depth:
-            depth_counts.append(0)
-        depth_counts[depth - 1] += 1
-        prev_depth = depth
+    # 构建前缀树和路径映射
+    path_to_id = {}
+    for i, path in enumerate(node_paths):
+        for j in range(len(path) + 1):
+            prefix = tuple(path[:j])
+            if prefix not in path_to_id:
+                path_to_id[prefix] = len(path_to_id)
     
-    # Create the attention mask for Medusa
-    medusa_attn_mask = torch.eye(medusa_len, medusa_len)
-    medusa_attn_mask[:, 0] = 1
-    start = 0
-    for i in range(len(depth_counts)):
-        for j in range(depth_counts[i]):
-            cur_medusa_choice = sorted_medusa_choices[start + j]
-            # retrieve ancestor position
-            if len(cur_medusa_choice) == 1:
-                continue
-            ancestor_idx = []
-            for c in range(len(cur_medusa_choice) - 1):
-                ancestor_idx.append(sorted_medusa_choices.index(cur_medusa_choice[:c+1]) + 1)
-            medusa_attn_mask[j + start + 1, ancestor_idx] = 1
-        start += depth_counts[i]
-
-    # Generate tree indices for the Medusa structure
-    medusa_tree_indices = torch.zeros(medusa_len, dtype=torch.long)
-    medusa_tree_indices[0] = 0
-    start = 0
-    for i in range(len(depth_counts)):
-        for j in range(depth_counts[i]):
-            cur_medusa_choice = sorted_medusa_choices[start + j]
-            medusa_tree_indices[start + j + 1] = cur_medusa_choice[-1] + TOPK * i + 1
-        start += depth_counts[i]
-
-    # Generate position IDs for the Medusa structure
-    medusa_position_ids = torch.zeros(medusa_len, dtype=torch.long)
-    start = 0
-    for i in range(len(depth_counts)):
-        medusa_position_ids[start + 1: start + depth_counts[i] + 1] = i + 1
-        start += depth_counts[i]
-
-    # Generate retrieval indices for Medusa structure verification
-    retrieve_indices_nest = []
-    retrieve_paths = []
-    for i in range(len(sorted_medusa_choices)):
-        cur_medusa_choice = sorted_medusa_choices[-i-1]
-        retrieve_indice = []
-        if cur_medusa_choice in retrieve_paths:
-            continue
-        else:
-            for c in range(len(cur_medusa_choice)):
-                retrieve_indice.append(sorted_medusa_choices.index(cur_medusa_choice[:c+1]))
-                retrieve_paths.append(cur_medusa_choice[:c+1])
-        retrieve_indices_nest.append(retrieve_indice)
-    max_length = max([len(x) for x in retrieve_indices_nest])
-    retrieve_indices = [pad_path(path, max_length) for path in retrieve_indices_nest]
-    retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
-    retrieve_indices = retrieve_indices + 1
-    retrieve_indices = torch.cat([torch.zeros((retrieve_indices.shape[0], 1), dtype=torch.long), retrieve_indices], dim=1)
-
-    # Aggregate the generated buffers into a dictionary
-    medusa_buffers = {
-        "medusa_attn_mask": medusa_attn_mask.unsqueeze(0).unsqueeze(0),
-        "tree_indices": medusa_tree_indices,
-        "medusa_position_ids": medusa_position_ids,
+    # 计算展平后的长度（每个唯一前缀对应一个token）
+    flatten_len = len(path_to_id)
+    
+    # 创建前缀到展平索引的映射
+    prefix_to_flatten_idx = {}
+    for prefix, idx in path_to_id.items():
+        prefix_to_flatten_idx[prefix] = idx
+    
+    # 生成位置ID
+    position_ids = torch.zeros(flatten_len, dtype=torch.long)
+    for prefix, idx in prefix_to_flatten_idx.items():
+        position_ids[idx] = len(prefix)
+    
+    # 创建注意力掩码
+    mhc_attn_mask = torch.zeros(flatten_len, flatten_len)
+    
+    # 所有token都可以看到base token（空前缀）
+    base_idx = prefix_to_flatten_idx[()]
+    mhc_attn_mask[:, base_idx] = 1
+    
+    # 每个token可以看到自己
+    for i in range(flatten_len):
+        mhc_attn_mask[i, i] = 1
+    
+    # 为每个前缀设置注意力掩码
+    for path in node_paths:
+        for depth in range(1, len(path) + 1):
+            prefix = tuple(path[:depth])
+            if prefix in prefix_to_flatten_idx:
+                token_idx = prefix_to_flatten_idx[prefix]
+                
+                # 该token可以看到其所有祖先
+                for ancestor_depth in range(depth):
+                    ancestor_prefix = tuple(path[:ancestor_depth])
+                    if ancestor_prefix in prefix_to_flatten_idx:
+                        ancestor_idx = prefix_to_flatten_idx[ancestor_prefix]
+                        mhc_attn_mask[token_idx, ancestor_idx] = 1
+    
+    # 扩展注意力掩码的维度以符合transformer的要求
+    mhc_attn_mask = mhc_attn_mask.unsqueeze(0).unsqueeze(0).to(device)
+    mhc_position_ids = position_ids.to(device)
+    
+    # 创建从candidates到flatten_candidates的映射（flatten_indices）
+    max_path_length = max(len(path) for path in node_paths) + 1  # +1 for base token
+    flatten_indices = []
+    for path in node_paths:
+        # 为每个路径创建一个映射数组，索引是深度，值是flatten_candidates中的位置
+        path_indices = torch.full((max_path_length,), -1, dtype=torch.long, device=device)
+        for depth in range(len(path) + 1):
+            prefix = tuple(path[:depth])
+            if prefix in prefix_to_flatten_idx:
+                path_indices[depth] = prefix_to_flatten_idx[prefix]
+        flatten_indices.append(path_indices)
+    
+    # 将flatten_indices转换为二维张量
+    retrieve_indices = torch.stack(flatten_indices, dim=0)
+    
+    # 聚合生成的缓冲区到字典
+    mhc_buffers = {
+        "mhc_attn_mask": mhc_attn_mask,
+        "mhc_position_ids": mhc_position_ids,
+        # "flatten_indices": flatten_indices,
         "retrieve_indices": retrieve_indices,
-        }
-    
-    # Move the tensors in the dictionary to the specified device
-    medusa_buffers = {
-        k: v.clone().to(device)
-        if isinstance(v, torch.Tensor)
-        else torch.tensor(v,  device=device)
-        for k, v in medusa_buffers.items()
+        # "prefix_to_flatten_idx": prefix_to_flatten_idx
+        "flatten_len": flatten_len
     }
-    return medusa_buffers
+    
+    return mhc_buffers
 
-
-def initialize_medusa(input_ids, model, medusa_attn_mask, past_key_values):
+def initialize_mhc(input_ids, model, mhc_attn_mask, past_key_values, node_paths):
     """
     Initializes the Medusa structure for a given model.
 
@@ -136,21 +127,21 @@ def initialize_medusa(input_ids, model, medusa_attn_mask, past_key_values):
     Args:
     - input_ids (torch.Tensor): The input tensor containing token ids.
     - model (MedusaLMHead): The model containing the Medusa layers and base model.
-    - medusa_attn_mask (torch.Tensor): The attention mask designed specifically for the Medusa structure.
+    - mhc_attn_mask (torch.Tensor): The attention mask designed specifically for the Mhc structure.
     - past_key_values (list of torch.Tensor): Contains past hidden states and past attention values.
 
     Returns:
-    - medusa_logits (torch.Tensor): Logits from the Medusa heads.
+    - mhc_logits (torch.Tensor): Logits from the Medusa heads.
     - logits (torch.Tensor): Original logits from the base model.
     """
-    medusa_logits, outputs, logits = model(
-        input_ids, past_key_values=past_key_values, output_orig=True, medusa_forward=True
+    _, outputs, logits = model(
+        input_ids, past_key_values=past_key_values, inference_mode=True,
     )
-    model.base_model.model.medusa_mask = medusa_attn_mask
-    return medusa_logits, logits
+    model.base_model.model.mhc_mask = mhc_attn_mask
+    return outputs[0], logits
 
 
-def reset_medusa_mode(
+def reset_mhc_mode(
     model,
 ):
     """
@@ -170,8 +161,8 @@ def reset_medusa_mode(
     Returns:
     - None
     """
-    model.base_model.model.medusa_mask = None
-    model.base_model.model.medusa_mode = None
+    model.base_model.model.mhc_mask = None
+    model.base_model.model.mhc_mode = None
 
 
 def reset_past_key_values(passed_key_values):
@@ -255,62 +246,159 @@ def get_typical_one_token(logit, temperature, posterior_threshold, posterior_alp
     sampled_tokens = torch.multinomial(F.softmax(logit, dim=-1), 1)
     return sampled_tokens
 
-def generate_candidates(medusa_logits, logits, tree_indices, retrieve_indices, temperature = 0, posterior_threshold=0.3, posterior_alpha = 0.09, top_p=0.8, sampling = 'typical', fast = False):
+def mhc_generate_candidates(model, base_hidden, base_token, attention_mask=None, past_key_values=None, position_ids=None, node_paths=None):
     """
-    Generate candidates based on provided logits and indices.
+    根据给定的路径参数，生成各路径的token索引
+    
+    Args:
+        model (MHCModel): MHC模型实例
+        base_hidden (torch.Tensor): 基础模型的隐藏状态
+        base_token (torch.Tensor): 基础模型采样得到的token索引，形状为[batch_size, 1]
+        attention_mask (torch.Tensor, optional): 注意力掩码
+        past_key_values (tuple, optional): 过去的key和value状态
+        position_ids (torch.Tensor, optional): 位置IDs
+        node_paths (list): 路径参数，每个路径是一个整数列表，表示在每个MHC头选择的top-k索引
+        
+    Returns:
+        padded_tokens: [路径数，最长序列长度]
+        path_logits: 一个路径中logits的列表，每一个元素为[1, 序列长度, 32000]
+    """
+
+    # 存储所有中间结果的字典，键为路径元组，值为(hidden_states, logits)元组
+    cache_results = {}
+    # 存储每条路径生成的token索引
+    path_logits = []
+    path_tokens = []
+    
+    # 对路径进行排序，确保依赖关系正确处理
+    # sorted_paths = sorted(node_paths, key=lambda x: (len(x), x))
+    
+    for path in node_paths:
+        # 查找最长的可复用前缀
+        for prefix_len in range(len(path), 0, -1):
+            prefix = tuple(path[:prefix_len])
+            if prefix in cache_results:
+                start_idx = prefix_len
+                break
+        else:
+            start_idx = 0
+        
+        # 从最长前缀之后开始计算
+        for head_idx in range(start_idx, min(len(path), model.mhc_num_heads)):
+            choice_idx = path[head_idx]
+            
+            if head_idx == 0:
+                # 第一个头直接使用base_token
+                tokens_for_path = torch.tensor([], dtype=torch.long, device=base_token.device)
+                logits_for_path = torch.tensor([], device=base_token.device)
+                pre_hidden = base_hidden
+                pre_token = base_token
+            else:
+                # 对于后续MHC头的结果
+                prev_path = tuple(path[:head_idx])
+                pre_hidden, tokens_for_path, logits_for_path = cache_results[prev_path]
+                pre_token = tokens_for_path[:, -1].unsqueeze(1)
+            # 使用mhc_forward计算当前头的输出
+            current_hidden, current_logits = model.mhc_forward(  #current_logits [1,1,32000]
+                head_idx, 
+                pre_hidden,
+                pre_token
+            )
+            k = choice_idx + 1
+            token_topk = current_logits.topk(k=k, dim=-1)
+            current_token = token_topk.indices[:, :, -1]       #bs,sl[1,1]
+
+            tokens_for_path = torch.cat([tokens_for_path, current_token], dim=1)
+            logits_for_path = torch.cat([logits_for_path, current_logits], dim=1)
+
+            current_path = tuple(path[:head_idx + 1])
+            cache_results[current_path] = (current_hidden, tokens_for_path, logits_for_path)
+        
+
+        path_logits.append(logits_for_path)
+        path_tokens.append(tokens_for_path)
+    
+    # 将path_tokens转换为二维张量
+    max_length = max(tokens.shape[1] for tokens in path_tokens)
+    device = base_token.device
+    padded_tokens = torch.zeros((len(path_tokens), max_length), dtype=torch.long, device=device)
+    
+    for i, tokens in enumerate(path_tokens):
+        padded_tokens[i, :tokens.shape[1]] = tokens
+    
+    return padded_tokens, path_logits
+
+def generate_candidates(model, base_hidden, base_logits, retrieve_indices, flatten_len, node_paths=None, temperature=0, posterior_threshold=0.3, posterior_alpha=0.09, top_p=0.8, sampling='typical', fast=False):
+    """
+    根据base_hidden和node_paths生成各路径的token索引，并将其展平
     
     Parameters:
-    - medusa_logits (torch.Tensor): Logits from a specialized Medusa structure, aiding in candidate selection.
-    - logits (torch.Tensor): Standard logits from a language model.
-    - tree_indices (list or torch.Tensor): Indices representing a tree structure, used for mapping candidates.
-    - retrieve_indices (list or torch.Tensor): Indices for extracting specific candidate tokens.
-    - temperature (float, optional): Controls the diversity of the sampling process. Defaults to 0.
-    - posterior_threshold (float, optional): Threshold for typical sampling. Defaults to 0.3.
-    - posterior_alpha (float, optional): Scaling factor for the entropy-based threshold in typical sampling. Defaults to 0.09.
-    - top_p (float, optional): Cumulative probability threshold for nucleus sampling. Defaults to 0.8.
-    - sampling (str, optional): Defines the sampling strategy ('typical' or 'nucleus'). Defaults to 'typical'.
-    - fast (bool, optional): If True, enables faster, deterministic decoding for typical sampling. Defaults to False.
-
+    - model (MHCModel): MHC模型实例
+    - base_hidden (torch.Tensor): 基础模型的隐藏状态
+    - base_logits (torch.Tensor): 基础模型的输出logits
+    - node_paths (list): 路径参数，每个路径是一个整数列表
+    - temperature (float): 温度参数
+    - posterior_threshold (float): 后验阈值
+    - posterior_alpha (float): 后验alpha参数
+    - top_p (float): top-p采样参数
+    - sampling (str): 采样方法，'typical'或'nucleus'
+    - fast (bool): 是否使用快速模式
+    
     Returns:
-    - tuple (torch.Tensor, torch.Tensor): A tuple containing two sets of candidates:
-        1. Cartesian candidates derived from the combined original and Medusa logits.
-        2. Tree candidates mapped from the Cartesian candidates using tree indices.
+    - tuple: 包含candidates、flatten_candidates、mhc_attn_mask和mhc_position_ids
     """
-    # Greedy decoding: Select the most probable candidate from the original logits.
+    device = base_hidden.device
+    
+    # 对node_paths进行排序
+    # sorted_paths = sorted(node_paths, key=lambda x: (len(x), x))
+    
+    # 从base_logits采样得到base_token
     if temperature == 0 or fast:
-        candidates_logit = torch.argmax(logits[:, -1]).unsqueeze(0)
+        base_token = torch.argmax(base_logits[:, -1:], dim=-1)
     else:
         if sampling == 'typical':
-            candidates_logit = get_typical_one_token(logits[:, -1], temperature, posterior_threshold, posterior_alpha).squeeze(0)
+            base_token = get_typical_one_token(base_logits[:, -1], temperature, posterior_threshold, posterior_alpha)
         elif sampling == 'nucleus':
-            candidates_logit = get_nucleus_one_token(logits[:, -1], temperature, top_p).squeeze(0)
+            base_token = get_nucleus_one_token(base_logits[:, -1], temperature, top_p)
         else:
             raise NotImplementedError
-    # Extract the TOPK candidates from the medusa logits.
-    candidates_medusa_logits = torch.topk(medusa_logits[:, 0, -1], TOPK, dim = -1).indices
-
-    # Combine the selected candidate from the original logits with the topk medusa logits.
-    candidates = torch.cat([candidates_logit, candidates_medusa_logits.view(-1)], dim=-1)
-
-    # Map the combined candidates to the tree indices to get tree candidates.
-    tree_candidates = candidates[tree_indices]
-
-    # Extend the tree candidates by appending a zero.
-    tree_candidates_ext = torch.cat([tree_candidates, torch.zeros((1), dtype=torch.long, device=tree_candidates.device)], dim=0)
-
-    # Retrieve the cartesian candidates using the retrieve indices.
-    cart_candidates = tree_candidates_ext[retrieve_indices]
-
-    # Unsqueeze the tree candidates for dimension consistency.
-    tree_candidates = tree_candidates.unsqueeze(0)
-    return cart_candidates, tree_candidates
+    
+    # 使用mhc_generate_candidates生成各路径的token索引
+    path_tokens, path_logits = mhc_generate_candidates(
+        model=model,
+        base_hidden=base_hidden,
+        base_token=base_token,
+        node_paths=node_paths
+    )
+    
+    # 将path_tokens转换为candidates（添加base_token列）
+    candidates = torch.zeros((path_tokens.shape[0], path_tokens.shape[1] + 1), dtype=torch.long, device=device)
+    candidates[:, 0] = base_token.item()
+    candidates[:, 1:] = path_tokens
+    
+    # 创建展平的候选token列表
+    flatten_candidates = torch.zeros(flatten_len, dtype=torch.long, device=device)
+    
+    # 填充base token
+    flatten_candidates[0] = base_token.item()
+    
+    # 使用retrieve_indices直接填充其他token
+    for path_idx in range(retrieve_indices.shape[0]):
+        for depth in range(1, retrieve_indices.shape[1]):
+            flatten_idx = retrieve_indices[path_idx, depth]
+            if flatten_idx >= 0:  # 确保有效的索引
+                token_idx = candidates[path_idx, depth]
+                flatten_candidates[flatten_idx] = token_idx
+    
+    flatten_candidates = flatten_candidates.unsqueeze(0)
+    return candidates, flatten_candidates, path_logits
 
 
 def tree_decoding(
     model,
     tree_candidates,
     past_key_values,
-    medusa_position_ids,
+    mhc_position_ids,
     input_ids,
     retrieve_indices,
 ):
@@ -330,22 +418,20 @@ def tree_decoding(
     """
 
     # Compute new position IDs by adding the Medusa position IDs to the length of the input sequence.
-    position_ids = medusa_position_ids + input_ids.shape[1]
+    position_ids = mhc_position_ids + input_ids.shape[1]
 
     # Use the model to decode the tree candidates. 
     # The model is expected to return logits for the Medusa structure, original logits, and possibly other outputs.
-    tree_medusa_logits, outputs, tree_logits = model(
+    _, outputs, tree_logits = model(
         tree_candidates,
-        output_orig=True,
         past_key_values=past_key_values,
         position_ids=position_ids,
-        medusa_forward=True,
+        inference_mode=True,
     )
     
     # Reorder the obtained logits based on the retrieve_indices to ensure consistency with some reference ordering.
     logits = tree_logits[0, retrieve_indices]
-    medusa_logits = tree_medusa_logits[:, 0, retrieve_indices]
-    return medusa_logits, logits, outputs
+    return outputs, logits
 
 def get_nucleus_posterior_mask(logits, candidates, temperature, top_p):
     """
@@ -430,8 +516,6 @@ def get_typical_posterior_mask(logits, candidates, temperature, posterior_thresh
     sampled_tokens = sampled_tokens.view(n_samples, n_tokens)
     posterior_mask = (candidates[:, 1:] == sampled_tokens).int()
     return posterior_mask
-    
-    
 
 def evaluate_posterior(
     logits, candidates, temperature, posterior_threshold=0.3, posterior_alpha = 0.09, top_p=0.8, sampling = 'typical', fast = True
@@ -528,6 +612,7 @@ def evaluate_posterior(
         return best_candidate, accept_length
     else:
         raise NotImplementedError
+
 def update_inference_inputs(
     input_ids,
     candidates,
@@ -536,7 +621,6 @@ def update_inference_inputs(
     retrieve_indices,
     outputs,
     logits,
-    medusa_logits,
     new_token,
     past_key_values_data,
     current_length_data,
@@ -550,7 +634,7 @@ def update_inference_inputs(
     - best_candidate (int): Index of the chosen best candidate.
     - accept_length (int): Length of the accepted candidate sequence.
     - retrieve_indices (torch.Tensor): Indices to map tree to a cartesian product.
-    - outputs, logits, medusa_logits (torch.Tensor): Model's outputs from the previous inference step.
+    - outputs, logits (torch.Tensor): Model's outputs from the previous inference step.
     - new_token (int): Counter for the new tokens added during inference.
     - past_key_values_data (torch.Tensor): Tensor containing past hidden states for the transformer model.
     - current_length_data (torch.Tensor): Tensor containing the current length of sequences in the batch.
@@ -558,8 +642,8 @@ def update_inference_inputs(
     Returns:
     - input_ids (torch.Tensor): Updated input token sequences.
     - logits (torch.Tensor): Updated logits.
-    - medusa_logits (torch.Tensor): Updated medusa logits.
     - new_token (int): Updated counter for the new tokens added.
+    - base_hidden (torch.Tensor): Hidden state of the base model.
     """
     # Calculate the starting position for new tokens based on the previous input length
     prev_input_len = input_ids.shape[1]
@@ -583,11 +667,11 @@ def update_inference_inputs(
     current_length_data.fill_(prev_input_len + tgt.shape[-2])
 
     # Extract logits and medusa logits for the accepted tokens
-    logits = logits[None, best_candidate, accept_length : accept_length + 1]
-    medusa_logits = medusa_logits[
-        :, None, best_candidate, accept_length : accept_length + 1
-    ]
+    logits = logits[best_candidate, accept_length : accept_length + 1, :].unsqueeze(1)
+    # logits = logits[None, best_candidate, accept_length : accept_length + 1]
+    # Get the base hidden states for the next iteration
+    base_hidden = outputs[0][..., retrieve_indices[best_candidate, accept_length], :].unsqueeze(1)
     # Update the new token counter
     new_token += accept_length + 1
 
-    return input_ids, logits, medusa_logits, new_token
+    return input_ids, logits, new_token, base_hidden

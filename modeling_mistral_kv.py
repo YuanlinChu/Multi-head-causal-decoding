@@ -3,6 +3,9 @@
 # There are mainly two modifications:
 # 1. Using preallocated GPU memory for KVCache
 # 2. Modifying attention mask for integration with Medusa
+
+# Source: medusa
+
 """ PyTorch Mistral model."""
 import inspect
 import math
@@ -798,17 +801,17 @@ class MistralModel(MistralPreTrainedModel):
                 expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
             )
 
-        # [MODIFIED] add medusa mask
-        if hasattr(self, "medusa_mask") and self.medusa_mask is not None:
-            medusa_mask = self.medusa_mask
-            medusa_len = medusa_mask.size(-1)
-            combined_attention_mask[:, :, -medusa_len:, -medusa_len:][
-                medusa_mask == 0
+        # [MODIFIED] add mhc mask
+        if hasattr(self, "mhc_mask") and self.mhc_mask is not None:
+            mhc_mask = self.mhc_mask
+            mhc_len = mhc_mask.size(-1)
+            combined_attention_mask[:, :, -mhc_len:, -mhc_len:][
+                mhc_mask == 0
             ] = combined_attention_mask.min()
-            if hasattr(self, "medusa_mode"):
+            if hasattr(self, "mhc_mode"):
                 # debug mode
-                if self.medusa_mode == "debug":
-                    torch.save(combined_attention_mask, "medusa_mask.pt")
+                if self.mhc_mode == "debug":
+                    torch.save(combined_attention_mask, "mhc_mask.pt")
 
         return combined_attention_mask
 

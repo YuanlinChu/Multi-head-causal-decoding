@@ -37,7 +37,8 @@ from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 import os
 from model import MHCModel, MHCConfig
-from default_config import DEFAULT_CONFIG
+# from default_config import MISTRAL_CONFIG as DEFAULT_CONFIG
+from default_config import VICUNA_CONFIG as DEFAULT_CONFIG
 import sys
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
@@ -67,7 +68,7 @@ class CustomizedTrainer(Trainer):
 
         # 获取模型输出
         logits = model(
-            input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"]
+            input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], labels = inputs["labels"]
         )
         labels = inputs["labels"]
         # print(inputs)
@@ -382,6 +383,24 @@ def train():
         config.rope_scaling = {"type": "linear", "factor": scaling_factor}
     config.use_cache = False
 
+    # 加载 tokenizer   加载预训练的分词器，设置填充标记
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=training_args.cache_dir,
+        model_max_length=training_args.model_max_length,
+        padding_side="right",
+        use_fast=True,
+    )
+    tokenizer.pad_token = tokenizer.unk_token
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # 添加以下代码来设置chat template
+    tokenizer.chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n'}}{% endfor %}"
+
+    # Making sure the tokenizer works before loading the model.
+    if local_rank == 0:
+        print(tokenizer(["This is a test", "secondary"], padding=True))
+        print(tokenizer.apply_chat_template([{"role": "user", "content": "This is a test"}]))
 
     # Load model and tokenizer
     model = transformers.AutoModelForCausalLM.from_pretrained(
@@ -390,6 +409,7 @@ def train():
         cache_dir=training_args.cache_dir,
         torch_dtype=torch.bfloat16,
     )
+
     # 打印模型结构
     # print("Base model structure:", model)
 
@@ -403,21 +423,6 @@ def train():
     # print(hasattr(model.model.layers[0].self_attn, "q_proj"))
     # layer = model.model.layers[0].self_attn.q_proj
     # print(f"Weights for q_proj: {layer.weight.data}")
-
-    # 加载 tokenizer   加载预训练的分词器，设置填充标记
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
-        model_max_length=training_args.model_max_length,
-        padding_side="right",
-        use_fast=True,
-    )
-    tokenizer.pad_token = tokenizer.unk_token
-    tokenizer.pad_token = tokenizer.eos_token
-
-    # Making sure the tokenizer works before loading the model.
-    # print(tokenizer(["This is a test", "secondary"], padding=True))
-    # print(tokenizer.apply_chat_template([{"role": "user", "content": "This is a test"}],chat_template=None))
 
     # Freeze the base model
     for param in model.base_model.parameters():
@@ -433,7 +438,6 @@ def train():
 
     # 打印模型结构
     # print("MHC model structure:", mhc_heads)
-    # mhc_heads.to("cuda:0")
 
     # Format output dir
     training_args.output_dir = f"{training_args.output_dir}_mhc_{model_args.model_name_or_path.split('/')[-1]}_headsnum_{training_args.mhc_num_heads}_lr_{training_args.learning_rate}_layersnum_{training_args.res_layer_nums}"
