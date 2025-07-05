@@ -2,9 +2,10 @@ import json
 from transformers import AutoTokenizer
 import numpy as np
 
-tokenizer=AutoTokenizer.from_pretrained("/hpc2hdd/home/ychu763/Documents/my_model/test_mhc_vicuna-7b-v1.5_headsnum_5_lr_0.001_layersnum_1")
-jsonl_file = "data/mt_bench/model_answer/vicuna-mhc-7b-v1.5-temperature-0.0-posterior_threshold-0.09-posterior_alpha-0.3.jsonl"
-jsonl_file_base = "data/mt_bench/model_answer/vicuna-medusa-7b-v1.5-greedy.jsonl"
+# tokenizer=AutoTokenizer.from_pretrained("/hpc2hdd/home/ychu763/Documents/my_model/shareGPT_mhc_vicuna-7b-v1.3_headsnum_5_lr_0.001_layersnum_1")
+tokenizer=AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.3")
+jsonl_file = "data/mt_bench/model_answer/vicuna-mhc-7b-v1.3-shareGPT-temperature-0.0-posterior_threshold-0.09-posterior_alpha-0.3.jsonl"
+jsonl_file_base = "data/mt_bench/model_answer/vicuna-mhc-7b-v1.3-greedy.jsonl"
 data = []
 with open(jsonl_file, 'r', encoding='utf-8') as file:
     for line in file:

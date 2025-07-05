@@ -27,6 +27,182 @@ from model import MHCModel
 from kv_cache import initialize_past_key_values
 from mhc_choices import *
 
+def mhc_forward_time(input_ids, model, tokenizer, mhc_choices, temperature, posterior_threshold, posterior_alpha, max_steps = 512):
+    assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
+    # Avoid modifying the input_ids in-place
+    input_ids = input_ids.clone()
+
+    # 对路径进行排序，确保依赖关系正确处理
+    node_paths = sorted(mhc_choices, key=lambda x: (len(x), x))
+
+    # 缓存MHC buffers（用于树形注意力的固定模式）
+    if hasattr(model, "node_paths") and model.node_paths == node_paths:
+        # 加载缓存的MHC buffer
+        mhc_buffers = model.mhc_buffers
+    else:
+        # 初始化MHC buffer
+        mhc_buffers = generate_mhc_buffers(
+            node_paths, device=model.base_model.device
+        )
+    model.mhc_buffers = mhc_buffers
+    model.node_paths = node_paths
+
+    # 初始化past key和value状态
+    if hasattr(model, "past_key_values"):
+        past_key_values = model.past_key_values
+        past_key_values_data = model.past_key_values_data
+        current_length_data = model.current_length_data
+        # Reset the past key and value states
+        current_length_data.zero_()
+    else:
+        (
+            past_key_values,
+            past_key_values_data,
+            current_length_data,
+        ) = initialize_past_key_values(model.base_model)
+        model.past_key_values = past_key_values
+        model.past_key_values_data = past_key_values_data
+        model.current_length_data = current_length_data
+
+    input_len = input_ids.shape[1]
+
+    reset_mhc_mode(model)  # 改为reset_mhc_mode
+    # 初始化树形注意力掩码并处理预填充tokens
+    base_hidden, logits = initialize_mhc(  # 改为initialize_mhc
+        input_ids, model, mhc_buffers["mhc_attn_mask"], past_key_values, mhc_choices
+    )
+
+    new_token = 0
+    last_round_token = 0
+    
+    # 初始化时间统计变量
+    total_times = []
+    generate_times = []
+    tree_decoding_times = []
+    evaluate_times = []
+    update_times = []
+    accept_lengths = []
+    
+    # 初始化best_candidate统计
+    candidate_counts = {}
+    # 不再预先初始化固定数量的键
+    
+    for idx in range(max_steps):
+        # 记录整个循环的开始时间
+        loop_start_time = time.time()
+        
+        # 使用MHC头的topk预测生成候选项
+        start_time = time.time()
+        candidates, flatten_candidates, path_logits = generate_candidates(
+            model,
+            base_hidden, 
+            logits,
+            mhc_buffers["retrieve_indices"],
+            mhc_buffers["flatten_len"],
+            node_paths,
+        )
+        generate_time = time.time() - start_time
+        
+        # 使用树形注意力验证候选项并获取预测
+        start_time = time.time()
+        outputs, logits = tree_decoding(
+            model,
+            flatten_candidates,
+            past_key_values,
+            mhc_buffers["mhc_position_ids"],
+            input_ids,
+            mhc_buffers["retrieve_indices"],
+        )
+        tree_decoding_time = time.time() - start_time
+        
+        # 评估候选项的后验概率以选择接受的候选前缀
+        start_time = time.time()
+        best_candidate, accept_length = evaluate_posterior(
+            logits, candidates, temperature, posterior_threshold, posterior_alpha
+        )
+        evaluate_time = time.time() - start_time
+        
+        # 统计best_candidate的分布 - 修复张量处理
+        if accept_length == 0:
+            best_candidate_key = -1  # 当accept_length为0时，标记为-1
+        else:
+            best_candidate_key = int(best_candidate.item()) if torch.is_tensor(best_candidate) else best_candidate
+        
+        if best_candidate_key not in candidate_counts:
+            candidate_counts[best_candidate_key] = 0
+        candidate_counts[best_candidate_key] += 1
+        
+        # 更新input_ids和logits
+        start_time = time.time()
+        input_ids, logits, new_token, base_hidden = update_inference_inputs(
+            input_ids,
+            candidates,
+            best_candidate,
+            accept_length,
+            mhc_buffers["retrieve_indices"],
+            outputs,
+            logits,
+            new_token,
+            past_key_values_data,
+            current_length_data,
+        )
+        update_time = time.time() - start_time
+        
+        # 计算整个循环的总时间
+        loop_total_time = time.time() - loop_start_time
+        
+        # 打印每个步骤的时间信息
+        # print(f"Step {idx} - Total: {loop_total_time:.4f}s | Generate: {generate_time:.4f}s ({generate_time/loop_total_time*100:.1f}%) | "
+        #       f"TreeDecode: {tree_decoding_time:.4f}s ({tree_decoding_time/loop_total_time*100:.1f}%) | "
+        #       f"Evaluate: {evaluate_time:.4f}s ({evaluate_time/loop_total_time*100:.1f}%) | "
+        #       f"Update: {update_time:.4f}s ({update_time/loop_total_time*100:.1f}%) | "
+        #       f"Accept Length: {accept_length}")
+
+        # 收集时间统计数据
+        total_times.append(loop_total_time)
+        generate_times.append(generate_time)
+        tree_decoding_times.append(tree_decoding_time)
+        evaluate_times.append(evaluate_time)
+        update_times.append(update_time)
+        accept_lengths.append(accept_length)
+
+        if tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
+            break
+        if new_token > 1024:
+            break
+    
+    # 计算并输出平均时间统计
+    if len(total_times) > 0:
+        avg_total = sum(total_times) / len(total_times)
+        avg_generate = sum(generate_times) / len(generate_times)
+        avg_tree_decoding = sum(tree_decoding_times) / len(tree_decoding_times)
+        avg_evaluate = sum(evaluate_times) / len(evaluate_times)
+        avg_update = sum(update_times) / len(update_times)
+        avg_accept_length = sum(accept_lengths) / len(accept_lengths)
+        
+        print(f"生成统计 ({idx+1} 步) - 平均每步时间: {avg_total:.4f}s | "
+              f"生成: {avg_generate:.4f}s ({avg_generate/avg_total*100:.1f}%) | "
+              f"树解码: {avg_tree_decoding:.4f}s ({avg_tree_decoding/avg_total*100:.1f}%) | "
+              f"评估: {avg_evaluate:.4f}s ({avg_evaluate/avg_total*100:.1f}%) | "
+              f"更新: {avg_update:.4f}s ({avg_update/avg_total*100:.1f}%) | "
+              f"平均接受长度: {avg_accept_length:.2f}")
+        
+        # 输出best_candidate分布统计
+        total_candidates = sum(candidate_counts.values())
+        print("\nbest_candidate 分布统计:")
+        for candidate_idx, count in sorted(candidate_counts.items()):
+            if total_candidates > 0:
+                percentage = (count / total_candidates) * 100
+                if candidate_idx == -1:
+                    path_info = "拒绝所有候选 (accept_length=0)"
+                else:
+                    path_info = f"路径 {candidate_idx}"
+                    if candidate_idx < len(node_paths):
+                        path_info += f": {node_paths[candidate_idx]}"
+                print(f"  {path_info} - 次数: {count} ({percentage:.2f}%)")
+    
+    return input_ids, new_token, idx
+
 
 def mhc_forward(input_ids, model, tokenizer, mhc_choices, temperature, posterior_threshold, posterior_alpha, max_steps = 512):
     assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
@@ -74,7 +250,6 @@ def mhc_forward(input_ids, model, tokenizer, mhc_choices, temperature, posterior
     )
 
     new_token = 0
-    last_round_token = 0
 
     for idx in range(max_steps):
         # 使用MHC头的topk预测生成候选项
@@ -242,7 +417,7 @@ def get_model_answers(
             try:
                 torch.cuda.synchronize()
                 start_time = time.time()
-                output_ids, new_token, idx = mhc_forward(
+                output_ids, new_token, idx = mhc_forward_time(
                     torch.as_tensor(input_ids).cuda(),
                     model,
                     tokenizer,
@@ -282,6 +457,7 @@ def get_model_answers(
                     output = output.replace("Assistant:", "", 1).strip()
             except RuntimeError as e:
                 print("ERROR question ID: ", question["question_id"])
+                print(f"错误详情: {str(e)}")
                 output = "ERROR"
 
             turns.append(output)
@@ -408,14 +584,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-path",
         type=str,
-        default="/hpc2hdd/home/ychu763/Documents/my_model/test_mhc_vicuna-7b-v1.5_headsnum_5_lr_0.001_layersnum_1",
+        default="/hpc2hdd/home/ychu763/Documents/my_model/shareGPT-4epochs_mhc_vicuna-7b-v1.3_headsnum_5_lr_0.001_layersnum_1",
         # required=True,
         help="The path to the weights. This can be a local folder or a Hugging Face repo ID.",
     )
     parser.add_argument(
         "--model-id", 
         type=str, 
-        default="vicuna-mhc-7b-v1.5",
+        default="vicuna-mhc-7b-v1.3-shareGPT",
         # required=True,
         )
     parser.add_argument(

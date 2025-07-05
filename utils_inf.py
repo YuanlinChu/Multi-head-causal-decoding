@@ -274,6 +274,9 @@ def mhc_generate_candidates(model, base_hidden, base_token, attention_mask=None,
     # 添加计数器统计mhc_forward调用次数
     # forward_count = 0
     
+    # 对路径进行排序，确保依赖关系正确处理
+    # sorted_paths = sorted(node_paths, key=lambda x: (len(x), x))
+    
     for path in node_paths:
         # 查找最长的可复用前缀
         for prefix_len in range(len(path), 0, -1):
@@ -350,55 +353,49 @@ def mhc_generate_candidates_new(model, base_hidden, base_token, attention_mask=N
         padded_tokens: [路径数，最长序列长度]
         path_logits: 一个路径中logits的列表，每一个元素为[1, 序列长度, 32000]
     """
-    device = base_token.device
-    
-    # 存储每条路径生成的token索引和logits
-    path_tokens_dict = {}
-    path_logits_dict = {}
+    # whole_time = time.time()
+    # 存储所有中间结果的字典，键为路径元组，值为(hidden_states, tokens, logits)元组
+    cache_results = {}
+    # 存储每条路径生成的token索引
+    path_logits = []
+    path_tokens = []
     
     # 添加计数器统计mhc_forward调用次数
-    # forward_count = 0
+    forward_count = 0
     
-    # 预先计算最大深度
+    # 初始化基础状态
+    cache_results[()] = (base_hidden, torch.tensor([], dtype=torch.long, device=base_token.device), 
+                         torch.tensor([], device=base_token.device))
+    
+    # 构建每个深度的所有唯一前缀集合
+    depth_prefixes = {}
     max_depth = max(len(path) for path in node_paths)
     
-    # 创建深度前缀映射，使用字典而不是集合，避免重复计算
-    depth_prefix_map = {}
     for depth in range(max_depth):
-        if depth >= model.mhc_num_heads:
-            break
-        depth_prefix_map[depth] = {}
-        for path_idx, path in enumerate(node_paths):
+        depth_prefixes[depth] = set()
+        for path in node_paths:
             if depth < len(path):
-                prefix = tuple(path[:depth])
-                if prefix not in depth_prefix_map[depth]:
-                    depth_prefix_map[depth][prefix] = []
-                depth_prefix_map[depth][prefix].append((path_idx, path))
+                depth_prefixes[depth].add(tuple(path[:depth]))
     
-    # 缓存中间结果
-    cache_results = {}
-    # 初始化基础状态
-    cache_results[()] = (base_hidden, 
-                         torch.zeros((1, 0), dtype=torch.long, device=device), 
-                         torch.zeros((1, 0, model.config.vocab_size), device=device))
-    
-    # 按深度处理
+    # 为每个深度计算一次logits，然后为该深度的所有路径选择不同的token
     for depth in range(max_depth):
         if depth >= model.mhc_num_heads:
             break
             
         # 获取当前深度的所有唯一父前缀
-        if depth not in depth_prefix_map:
-            continue
-            
-        for parent_prefix, paths_info in depth_prefix_map[depth].items():
+        parent_prefixes = depth_prefixes[depth]
+        
+        # 对每个父前缀，计算一次mhc_forward，然后为所有子路径选择不同的token
+        for parent_prefix in parent_prefixes:
             # 获取父前缀的结果
             parent_hidden, parent_tokens, parent_logits = cache_results[parent_prefix]
             
             # 获取前一个token
             if depth == 0:
+                # 第一个头使用base_token
                 prev_token = base_token
             else:
+                # 使用父前缀生成的最后一个token
                 prev_token = parent_tokens[:, -1].unsqueeze(1)
             
             # 使用mhc_forward计算当前头的输出
@@ -407,11 +404,12 @@ def mhc_generate_candidates_new(model, base_hidden, base_token, attention_mask=N
                 parent_hidden,
                 prev_token
             )
-            # forward_count += 1
-            
-            # 为每个使用此前缀的路径处理token选择
-            for path_idx, path in paths_info:
-                if depth < len(path):
+            forward_count += 1
+
+            # 找出所有以该父前缀开头的路径，并为它们选择不同的token
+            for path in node_paths:
+                if depth < len(path) and tuple(path[:depth]) == parent_prefix:
+                    # 获取当前路径在当前深度的选择
                     choice_idx = path[depth]
                     
                     # 根据choice_idx选择token
@@ -420,42 +418,34 @@ def mhc_generate_candidates_new(model, base_hidden, base_token, attention_mask=N
                     current_token = token_topk.indices[:, :, -1]
                     
                     # 更新tokens和logits
-                    if parent_tokens.shape[1] > 0:
-                        current_tokens = torch.cat([parent_tokens, current_token], dim=1)
-                        current_logits_full = torch.cat([parent_logits, current_logits], dim=1)
-                    else:
-                        current_tokens = current_token
-                        current_logits_full = current_logits
+                    current_tokens = torch.cat([parent_tokens, current_token], dim=1) if parent_tokens.numel() > 0 else current_token
+                    current_logits_full = torch.cat([parent_logits, current_logits], dim=1) if parent_logits.numel() > 0 else current_logits
                     
                     # 缓存结果
                     current_prefix = tuple(path[:depth+1])
                     cache_results[current_prefix] = (current_hidden, current_tokens, current_logits_full)
-                    
-                    # 如果这是路径的最后一个处理深度，保存结果
-                    if depth == min(len(path), model.mhc_num_heads) - 1:
-                        path_tokens_dict[path_idx] = current_tokens
-                        path_logits_dict[path_idx] = current_logits_full
     
-    # 按原始node_paths顺序构建输出
-    path_tokens = []
-    path_logits = []
-    for i in range(len(node_paths)):
-        if i in path_tokens_dict:
-            path_tokens.append(path_tokens_dict[i])
-            path_logits.append(path_logits_dict[i])
+    # 构建最终输出
+    for path in node_paths:
+        prefix = tuple(path[:min(len(path), model.mhc_num_heads)])
+        if prefix in cache_results:
+            _, tokens, logits = cache_results[prefix]
+            path_tokens.append(tokens)
+            path_logits.append(logits)
     
     # 将path_tokens转换为二维张量
-    if path_tokens:
-        max_length = max(tokens.shape[1] for tokens in path_tokens)
-        padded_tokens = torch.zeros((len(path_tokens), max_length), dtype=torch.long, device=device)
-        
-        for i, tokens in enumerate(path_tokens):
-            padded_tokens[i, :tokens.shape[1]] = tokens
-    else:
-        padded_tokens = torch.zeros((0, 0), dtype=torch.long, device=device)
+    max_length = max(tokens.shape[1] for tokens in path_tokens)
+    device = base_token.device
+    padded_tokens = torch.zeros((len(path_tokens), max_length), dtype=torch.long, device=device)
     
-    # print(f"forward_count: {forward_count}")
+    for i, tokens in enumerate(path_tokens):
+        padded_tokens[i, :tokens.shape[1]] = tokens
+
+    # whole_forward_time = time.time() - whole_time forward_count
+    # print(f"whole_forward_time: {whole_forward_time:.4f}s ")
+    print(f"forward_count: {forward_count}")
     return padded_tokens, path_logits
+
 
 def generate_candidates(model, base_hidden, base_logits, retrieve_indices, flatten_len, node_paths=None, temperature=0, posterior_threshold=0.3, posterior_alpha=0.09, top_p=0.8, sampling='typical', fast=False):
     """
@@ -478,6 +468,9 @@ def generate_candidates(model, base_hidden, base_logits, retrieve_indices, flatt
     """
     device = base_hidden.device
     
+    # 对node_paths进行排序
+    # sorted_paths = sorted(node_paths, key=lambda x: (len(x), x))
+    
     # 从base_logits采样得到base_token
     if temperature == 0 or fast:
         base_token = torch.argmax(base_logits[:, -1:], dim=-1)
@@ -496,7 +489,7 @@ def generate_candidates(model, base_hidden, base_logits, retrieve_indices, flatt
         base_token=base_token,
         node_paths=node_paths
     )
-
+    
     # 将path_tokens转换为candidates（添加base_token列）
     candidates = torch.zeros((path_tokens.shape[0], path_tokens.shape[1] + 1), dtype=torch.long, device=device)
     candidates[:, 0] = base_token.item()

@@ -16,6 +16,12 @@
 
 # Adapted from: https://github.com/lm-sys/FastChat/blob/main/fastchat/train/train.py
 
+"""train mhc_heads model.
+
+Usage:
+torchrun --nproc_per_node=2 train.py
+"""
+
 from dataclasses import dataclass, field
 import json
 import math

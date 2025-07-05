@@ -53,19 +53,19 @@ MISTRAL_CONFIG = {
 VICUNA_CONFIG = {
     # 模型参数
     "model_args": {
-        "model_name_or_path": "lmsys/vicuna-7b-v1.5",
+        "model_name_or_path": "lmsys/vicuna-7b-v1.3",
     },
     
     # 数据参数
     "data_args": {
-        "data_path": "data/vicuna.json",
+        "data_path": "data/ShareGPT.json",
         "lazy_preprocess": True,
     },
     
     # 训练参数
     "training_args": {
         # Medusa 特定参数
-        "mhc_num_heads": 8,
+        "mhc_num_heads": 5,
         "res_layer_nums": 1,
         
         # 基础训练参数
@@ -73,7 +73,7 @@ VICUNA_CONFIG = {
         "per_device_train_batch_size": 8,
         "per_device_eval_batch_size": 8,
         "gradient_accumulation_steps": 4,
-        "num_train_epochs": 2,
+        "num_train_epochs": 4,
         
         # 优化器设置
         "learning_rate": 1e-3,
@@ -82,11 +82,11 @@ VICUNA_CONFIG = {
         "lr_scheduler_type": "cosine",
         
         # 输出和评估
-        "output_dir": "test",
+        "output_dir": "shareGPT-4epochs",
         "eval_strategy": "no",
         # "save_strategy": "no",
         "save_strategy": "steps",  # 改为"steps"
-        "save_steps": 2000,         # 每200步保存一次
+        "save_steps": 1000,         # 每200步保存一次
         "logging_steps": 1,
         
         # 精度设置

@@ -411,14 +411,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-path",
         type=str,
-        default="/hpc2hdd/home/ychu763/Documents/my_model/test_mhc_vicuna-7b-v1.5_headsnum_5_lr_0.001_layersnum_1",
+        default="/hpc2hdd/home/ychu763/Documents/my_model/shareGPT_mhc_vicuna-7b-v1.3_headsnum_5_lr_0.001_layersnum_1",
         # required=True,
         help="The path to the weights. This can be a local folder or a Hugging Face repo ID.",
     )
     parser.add_argument(
         "--model-id", 
         type=str, 
-        default="vicuna-mhc-7b-v1.5",
+        default="vicuna-mhc-7b-v1.3",
         # required=True,
         )
     parser.add_argument(
