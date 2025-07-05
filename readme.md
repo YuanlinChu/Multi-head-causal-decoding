@@ -1,81 +1,83 @@
 # MHC: Multi-Head-Casual Language Model
 
-## 简介
+## Introduction
 
-MHC（Multi-Head-Casual）是一个基于多解码头的语言模型加速框架，灵感来源于Medusa项目。与传统的多头解码方法不同，MHC在连续的解码头之间引入了因果机制，实现了更高效的并行推理。
+MHC (Multi-Head-Casual) is a speculative decoding acceleration framework based on multi-decoding heads. Unlike traditional multi-head decoding methods, MHC introduces a causal mechanism between consecutive decoding heads, achieving more efficient parallel inference.
 
-### 核心特性
+![MHC Architecture](mhc_Architecture.jpg)
 
-- **因果多头解码**：每个解码头依赖于前一个解码头的隐藏层输出和输出token的embedding向量
-- **级联依赖设计**：通过concat操作将前一头的输出与当前头的输入结合，经过维度变化和残差层处理
-- **高效推理**：通过树形注意力机制和候选验证，实现比传统自回归解码更快的推理速度
-- **兼容性强**：支持Vicuna、Mistral等主流语言模型
+### Core Features
 
-### 架构特点
+- **Causal Multi-Head Decoding**: Each decoding head depends on the hidden layer output and output token embedding vectors from the previous decoding head
+- **Cascade Dependency Design**: Combines the output of the previous head with the input of the current head through concat operations, processed through dimension transformation and residual layers
+- **Efficient Inference**: Achieves faster inference than traditional autoregressive decoding through tree attention mechanisms and candidate verification
+- **Strong Compatibility**: Supports mainstream language models such as Vicuna and Mistral
+
+### Architecture Features
 
 ```
-输入 → 基础模型 → 隐藏状态
+Input → Base Model → Hidden State
                       ↓
-Head1: 隐藏状态 → ResBlock → 输出1
+Head1: Hidden State → ResBlock → Output1
                       ↓
-Head2: [隐藏状态 + 输出1嵌入] → ResBlock → 输出2
+Head2: [Hidden State + Output1 Embedding] → ResBlock → Output2
                       ↓
-Head3: [隐藏状态 + 输出2嵌入] → ResBlock → 输出3
+Head3: [Hidden State + Output2 Embedding] → ResBlock → Output3
                       ↓
                      ...
 ```
 
-每个MHC头通过以下方式处理：
-1. 将前一头的隐藏状态和输出token embedding进行concat
-2. 通过维度变换层调整到合适的hidden size
-3. 经过多个ResBlock残差层处理
-4. 输出当前位置的预测token
+Each MHC head processes through the following steps:
+1. Concatenate the hidden state and output token embedding from the previous head
+2. Adjust to appropriate hidden size through dimension transformation layer
+3. Process through multiple ResBlock residual layers
+4. Output predicted token for current position
 
-## 安装
+## Installation
 
-### 环境要求
+### Environment Requirements
 
 - Python 3.8+
 - PyTorch 2.0+
 - CUDA 11.8+
 - transformers >= 4.28.0
 
-### 安装步骤
+### Installation Steps
 
-1. 克隆项目：
+1. Clone the project:
 ```bash
 git clone <repository_url>
 cd my_model
 ```
 
-2. 安装依赖：
+2. Install dependencies:
 ```bash
 pip install torch transformers accelerate deepspeed
 pip install fastchat wandb tqdm shortuuid
 pip install safetensors huggingface_hub
 ```
 
-3. 安装额外依赖（可选）：
+3. Install optional dependencies:
 ```bash
-pip install bitsandbytes  # 用于4bit/8bit量化
+pip install bitsandbytes  # For 4bit/8bit quantization
 ```
 
-## 训练
+## Training
 
-### 数据准备
+### Data Preparation
 
-1. 准备训练数据（ShareGPT格式）：
+1. Prepare training data (ShareGPT format):
 ```bash
-# 下载ShareGPT数据集
+# Download ShareGPT dataset
 git clone https://huggingface.co/datasets/Aeala/ShareGPT_Vicuna_unfiltered
 ```
 
-2. 数据预处理：
+2. Data preprocessing:
 ```bash
 python data/create_data.py --input-filename ShareGPT_Vicuna_unfiltered/ShareGPT_V4.3_unfiltered_cleaned_split.json --output-filename data/ShareGPT.json
 ```
 
-### 单GPU训练
+### Single GPU Training
 
 ```bash
 python train.py \
@@ -98,9 +100,9 @@ python train.py \
     --lazy_preprocess True
 ```
 
-### 多GPU训练（推荐）
+### Multi-GPU Training (Recommended)
 
-使用DeepSpeed进行多GPU训练：
+Use DeepSpeed for multi-GPU training:
 
 ```bash
 torchrun --nproc_per_node=4 train.py \
@@ -124,53 +126,53 @@ torchrun --nproc_per_node=4 train.py \
     --deepspeed deepspeed.json
 ```
 
-### 训练参数说明
+### Training Parameters Explanation
 
-- `--mhc_num_heads`: MHC头的数量，默认5
-- `--res_layer_nums`: 每个MHC头的残差层数量，默认1
-- `--learning_rate`: 学习率，建议1e-3（因为只训练新增的头部）
-- `--deepspeed`: DeepSpeed配置文件路径
+- `--mhc_num_heads`: Number of MHC heads, default 5
+- `--res_layer_nums`: Number of residual layers per MHC head, default 1
+- `--learning_rate`: Learning rate, recommended 1e-3 (since only training new heads)
+- `--deepspeed`: DeepSpeed configuration file path
 
-## 推理
+## Inference
 
-### 命令行对话
+### Command Line Chat
 
-启动交互式命令行界面：
+Start interactive command line interface:
 
 ```bash
 python cli.py --model <model_path>
 ```
 
-示例：
+Example:
 ```bash
 python cli.py --model ./output_mhc/checkpoint-2000
 ```
 
-### 推理参数
+### Inference Parameters
 
 ```bash
 python cli.py \
     --model ./output_mhc/checkpoint-2000 \
     --temperature 0.0 \
     --max_steps 512 \
-    --load-in-8bit  # 可选：8bit量化
+    --load-in-8bit  # Optional: 8bit quantization
 ```
 
-### 命令行交互命令
+### Command Line Interactive Commands
 
-在对话界面中可以使用以下命令：
-- `!!exit` 或空行：退出程序
-- `!!reset`：重置对话
-- `!!remove`：删除最后一条消息
-- `!!regen`：重新生成最后一条回复
-- `!!save <filename>`：保存对话历史
-- `!!load <filename>`：加载对话历史
+The following commands are available in the chat interface:
+- `!!exit` or empty line: Exit the program
+- `!!reset`: Reset conversation
+- `!!remove`: Remove last message
+- `!!regen`: Regenerate last reply
+- `!!save <filename>`: Save conversation history
+- `!!load <filename>`: Load conversation history
 
-## 评估
+## Evaluation
 
-### MT-Bench评估
+### MT-Bench Evaluation
 
-1. 生成模型回答：
+1. Generate model answers:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python eval/gen_mhc_model_answer.py \
     --model-path ./output_mhc/checkpoint-2000 \
@@ -180,14 +182,14 @@ CUDA_VISIBLE_DEVICES=0 python eval/gen_mhc_model_answer.py \
     --posterior_alpha 0.3
 ```
 
-2. 生成baseline回答：
+2. Generate baseline answers:
 ```bash
 CUDA_VISIBLE_DEVICES=0 python eval/gen_mhc_model_answer_baseline.py \
     --model-path ./output_mhc/checkpoint-2000 \
     --model-id mhc-vicuna-7b-v1.3-baseline
 ```
 
-### 速度测试
+### Speed Testing
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python eval/speed.py \
@@ -195,49 +197,49 @@ CUDA_VISIBLE_DEVICES=0 python eval/speed.py \
     --mhc_choices mc_sim_7b_63
 ```
 
-## 配置文件
+## Configuration Files
 
-项目使用`default_config.py`管理训练配置，支持：
+The project uses `default_config.py` to manage training configurations, supporting:
 
-- **VICUNA_CONFIG**: Vicuna模型配置
-- **MISTRAL_CONFIG**: Mistral模型配置
+- **VICUNA_CONFIG**: Vicuna model configuration
+- **MISTRAL_CONFIG**: Mistral model configuration
 
-可以根据需要修改配置文件中的参数。
+You can modify parameters in the configuration file as needed.
 
-## 项目结构
+## Project Structure
 
 ```
 my_model/
-├── train.py              # 训练脚本
-├── cli.py                # 命令行推理接口
-├── model.py              # MHC模型定义
-├── utils.py              # 工具函数
-├── default_config.py     # 默认配置
-├── mhc_choices.py        # MHC选择策略
-├── data/                 # 数据处理脚本
-├── eval/                 # 评估脚本
+├── train.py              # Training script
+├── cli.py                # Command line inference interface
+├── model.py              # MHC model definition
+├── utils.py              # Utility functions
+├── default_config.py     # Default configuration
+├── mhc_choices.py        # MHC choice strategies
+├── data/                 # Data processing scripts
+├── eval/                 # Evaluation scripts
 │   ├── gen_mhc_model_answer.py
 │   ├── gen_mhc_model_answer_baseline.py
 │   └── speed.py
-└── deepspeed.json        # DeepSpeed配置
+└── deepspeed.json        # DeepSpeed configuration
 ```
 
-## 性能特点
+## Performance Characteristics
 
-- **推理加速**：通过多头并行预测实现约2x的推理加速
-- **内存效率**：只需训练新增的MHC头部，显存需求相对较小
-- **模型兼容**：支持主流的Llama、Vicuna、Mistral等模型架构
+- **Inference Acceleration**: Achieves approximately 2x inference speedup through multi-head parallel prediction
+- **Memory Efficiency**: Only requires training the new MHC heads, relatively small GPU memory requirements
+- **Model Compatibility**: Supports mainstream model architectures like Llama, Vicuna, and Mistral
 
-## 注意事项
+## Important Notes
 
-1. 训练时只训练新增的MHC头部，基础模型参数保持冻结
-2. 推荐使用DeepSpeed进行多GPU训练以提高效率
-3. 推理时支持4bit/8bit量化以减少显存使用
-4. 评估时可以调整`posterior_threshold`和`posterior_alpha`参数优化性能
+1. During training, only the new MHC heads are trained while base model parameters remain frozen
+2. DeepSpeed is recommended for multi-GPU training to improve efficiency
+3. Inference supports 4bit/8bit quantization to reduce GPU memory usage
+4. During evaluation, you can adjust `posterior_threshold` and `posterior_alpha` parameters to optimize performance
 
-## 致谢
+## Acknowledgments
 
-本项目基于以下优秀的开源项目：
+This project is based on the following excellent open-source projects:
 - [Medusa](https://github.com/FasterDecoding/Medusa)
 - [FastChat](https://github.com/lm-sys/FastChat)
 - [Transformers](https://github.com/huggingface/transformers)
