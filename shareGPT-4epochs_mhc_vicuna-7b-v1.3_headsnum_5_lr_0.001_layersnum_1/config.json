@@ -1,6 +1,0 @@
-{
-  "base_model_name_or_path": "lmsys/vicuna-7b-v1.3",
-  "mhc_num_heads": 5,
-  "res_layer_nums": 1,
-  "transformers_version": "4.47.1"
-}
