@@ -52,6 +52,8 @@ cd Multi-head-causal-decoding
 
 2. Install dependencies:
 ```bash
+conda create -n mhc python=3.9
+conda activate mhc
 pip install torch transformers accelerate deepspeed
 pip install fastchat wandb tqdm shortuuid
 pip install safetensors huggingface_hub
