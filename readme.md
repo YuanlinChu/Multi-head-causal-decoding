@@ -46,8 +46,8 @@ Each MHC head processes through the following steps:
 
 1. Clone the project:
 ```bash
-git clone <repository_url>
-cd my_model
+git clone https://github.com/YuanlinChu/Multi-head-causal-decoding.git
+cd Multi-head-causal-decoding
 ```
 
 2. Install dependencies:
